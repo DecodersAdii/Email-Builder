@@ -1,1 +1,1 @@
-Email Builder Template
+Email Template Builder
