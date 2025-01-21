@@ -17,12 +17,13 @@ const port = 3000;
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(join(__dirname, 'uploads')));
 
 // Configure multer for image uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, 'uploads/');
+    const uploadsDir = join(__dirname, 'uploads');
+    cb(null, uploadsDir);
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -32,32 +33,63 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
+// Add error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Global error:', err);
+  res.status(500).send({ error: 'Internal server error: ' + err.message });
+});
+
 // Database setup
 let db;
 async function setupDatabase() {
-  // Ensure uploads directory exists
-  await fs.mkdir('uploads', { recursive: true });
-  
-  db = await open({
-    filename: 'database.sqlite',
-    driver: sqlite3.Database
-  });
+  try {
+    // Ensure uploads directory exists with proper path
+    const uploadsDir = join(__dirname, 'uploads');
+    await fs.mkdir(uploadsDir, { recursive: true });
+    console.log('Uploads directory created at:', uploadsDir);
+    
+    const dbPath = join(__dirname, 'database.sqlite');
+    console.log('Setting up database at:', dbPath);
+    
+    db = await open({
+      filename: dbPath,
+      driver: sqlite3.Database
+    });
+    
+    console.log('Database connection established');
 
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS templates (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      footer TEXT,
-      imageUrl TEXT,
-      styles TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        footer TEXT,
+        imageUrl TEXT,
+        styles TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('Database tables created successfully');
+  } catch (error) {
+    console.error('Database setup failed:', error);
+    throw error; // Let the error propagate instead of exiting
+  }
 }
 
-setupDatabase();
+// Initialize the server
+async function initializeServer() {
+  try {
+    await setupDatabase();
+    
+    app.listen(port, () => {
+      console.log(`Server running at http://localhost:${port}`);
+    });
+  } catch (error) {
+    console.error('Server initialization failed:', error);
+    process.exit(1);
+  }
+}
 
 // Get email layout
 app.get('/api/getEmailLayout', async (req, res) => {
@@ -72,25 +104,50 @@ app.get('/api/getEmailLayout', async (req, res) => {
 
 // Upload image
 app.post('/api/uploadImage', upload.single('image'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).send({ error: 'No file uploaded' });
+  try {
+    if (!req.file) {
+      console.log('No file uploaded');
+      return res.status(400).send({ error: 'No file uploaded' });
+    }
+    console.log('File uploaded successfully:', req.file);
+    const imageUrl = `http://localhost:${port}/uploads/${req.file.filename}`;
+    res.send({ imageUrl });
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    res.status(500).send({ error: 'Failed to upload image: ' + error.message });
   }
-  const imageUrl = `http://localhost:${port}/uploads/${req.file.filename}`;
-  res.send({ imageUrl });
 });
 
 // Save email template
 app.post('/api/uploadEmailConfig', async (req, res) => {
   try {
+    console.log('Received template upload request:', req.body);
     const { title, content, footer, imageUrl, styles } = req.body;
+    
+    if (!title || !content) {
+      console.log('Validation failed: missing title or content');
+      return res.status(400).send({ error: 'Title and content are required' });
+    }
+
+    if (!db) {
+      throw new Error('Database connection not established');
+    }
+
     const result = await db.run(
       `INSERT INTO templates (title, content, footer, imageUrl, styles)
        VALUES (?, ?, ?, ?, ?)`,
       [title, content, footer, imageUrl, JSON.stringify(styles)]
     );
+    
+    console.log('Template saved successfully:', result);
     res.send({ id: result.lastID });
   } catch (error) {
-    res.status(500).send({ error: 'Failed to save template' });
+    console.error('Error saving template:', error);
+    res.status(500).send({ 
+      error: 'Failed to save template',
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -120,6 +177,5 @@ app.post('/api/renderAndDownloadTemplate', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+// Replace the direct server start with the initialization function
+initializeServer();
